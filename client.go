@@ -61,7 +61,7 @@ func connectNetfilter(bufferSize int, groups uint32) (int, *syscall.SockaddrNetl
 }
 
 // Make syscall asking for all connections. Invoke 'cb' for each connection.
-func queryAllConnections(bufferSize int, cb func(Conn)) error {
+func queryAllConnections(bufferSize int, cb func(Conn), inetFamily uint8) error {
 	s, lsa, err := connectNetfilter(bufferSize, 0)
 	if err != nil {
 		return err
@@ -77,7 +77,7 @@ func queryAllConnections(bufferSize int, cb func(Conn)) error {
 			Seq:   0,
 		},
 		Body: unix.Nfgenmsg{
-			Nfgen_family: syscall.AF_INET,
+			Nfgen_family: inetFamily,
 			Version:      NFNETLINK_V0,
 			Res_id:       0,
 		},
@@ -92,33 +92,33 @@ func queryAllConnections(bufferSize int, cb func(Conn)) error {
 }
 
 // Stream all connections instead of query for all of them at once.
-func StreamAllConnections() chan Conn {
+func StreamAllConnections(inetFamily uint8) chan Conn {
 	ch := make(chan Conn, 1)
 	go func() {
 		queryAllConnections(0, func(c Conn) {
 			ch <- c
-		})
+		}, inetFamily)
 		close(ch)
 	}()
 	return ch
 }
 
 // Lists all the connections that conntrack is tracking.
-func Connections() ([]Conn, error) {
-	return ConnectionsSize(0)
+func Connections(inetFamily uint8) ([]Conn, error) {
+	return ConnectionsSize(0, inetFamily)
 }
 
 // Lists all the connections that conntrack is tracking, using specified netlink buffer size.
-func ConnectionsSize(bufferSize int) ([]Conn, error) {
+func ConnectionsSize(bufferSize int, inetFamily uint8) ([]Conn, error) {
 	var conns []Conn
 	queryAllConnections(bufferSize, func(c Conn) {
 		conns = append(conns, c)
-	})
+	}, inetFamily)
 	return conns, nil
 }
 
 // Established lists all established TCP connections.
-func Established() ([]ConnTCP, error) {
+func Established(inetFamily uint8) ([]ConnTCP, error) {
 	var conns []ConnTCP
 	local := localIPs()
 	err := queryAllConnections(0, func(c Conn) {
@@ -133,7 +133,7 @@ func Established() ([]ConnTCP, error) {
 		if tc := c.ConnTCP(local); tc != nil {
 			conns = append(conns, *tc)
 		}
-	})
+	}, inetFamily)
 	if err != nil {
 		return nil, err
 	}
@@ -227,18 +227,24 @@ loop:
 }
 
 type Tuple struct {
-	Proto   int
+	Proto   uint8
 	Src     net.IP
 	SrcPort uint16
 	Dst     net.IP
 	DstPort uint16
+
+	// Flow stats.
+	Bytes   uint64
+	Packets uint64
 
 	// ICMP stuff.
 	IcmpId   uint16
 	IcmpType uint8
 	IcmpCode uint8
 }
-
+func (t Tuple) String() string {
+	return fmt.Sprintf("src=%v dst=%v sport=%d dport=%d packets=%d size=%d",t.Src,t.Dst,t.SrcPort,t.DstPort,t.Packets,t.Bytes)
+}
 type Conn struct {
 	MsgType  NfConntrackMsg
 	TCPState string
@@ -255,16 +261,12 @@ type Conn struct {
 	// For multitenancy.
 	Zone uint16
 
-	// Flow stats.
-	ReplyPktLen   uint64
-	ReplyPktCount uint64
-	OrigPktLen    uint64
-	OrigPktCount  uint64
-
 	// Error, if any.
 	Err error
 }
-
+func (c Conn) String() string{
+	return fmt.Sprintf("%d %s %v %v mark=%d\n",c.Orig.Proto,c.TCPState,c.Orig,c.Reply,c.CtMark)
+}
 // ConnTCP decides which way this connection is going and makes a ConnTCP.
 func (c Conn) ConnTCP(local map[string]struct{}) *ConnTCP {
 	// conntrack gives us all connections, even things passing through, but it
@@ -313,9 +315,9 @@ func parsePayload(b []byte) (*Conn, error) {
 		case CtaTupleReply:
 			parseTuple(attr.Msg, &conn.Reply)
 		case CtaCountersOrig:
-			conn.OrigPktLen, conn.OrigPktCount, _ = parseCounters(attr.Msg)
+			conn.Orig.Packets, conn.Orig.Bytes, _ = parseCounters(attr.Msg)
 		case CtaCountersReply:
-			conn.ReplyPktLen, conn.ReplyPktCount, _ = parseCounters(attr.Msg)
+			conn.Reply.Packets, conn.Reply.Bytes, _ = parseCounters(attr.Msg)
 		case CtaStatus:
 			conn.Status = CtStatus(binary.BigEndian.Uint32(attr.Msg))
 		case CtaProtoinfo:
@@ -408,7 +410,7 @@ func parseProto(b []byte, tuple *Tuple) error {
 		switch CtattrL4proto(attr.Typ) {
 		// Protocol number.
 		case CtaProtoNum:
-			tuple.Proto = int(uint8(attr.Msg[0]))
+			tuple.Proto = uint8(attr.Msg[0])
 
 		// TCP stuff.
 		case CtaProtoSrcPort:
