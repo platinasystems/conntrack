@@ -4,13 +4,15 @@ package main
 
 import (
 	"fmt"
-	"time"
 
-	"github.com/typetypetype/conntrack"
+	"github.com/platinasystems/conntrack"
+	"log"
+	"time"
+	"syscall"
 )
 
 func main() {
-	cs, err := conntrack.Established()
+/*	cs, err := conntrack.Established()
 	if err != nil {
 		panic(fmt.Sprintf("Established: %s", err))
 	}
@@ -29,5 +31,15 @@ func main() {
 		for _, cn := range c.Connections() {
 			fmt.Printf(" - %s\n", cn)
 		}
+	}*/
+	for {
+		conns, err := conntrack.Connections(syscall.AF_INET)
+		if err != nil {
+			log.Fatalln("failed to fetch connections...ERROR:", err)
+		}
+		for _, c := range conns {
+			fmt.Println(c)
+		}
+		<- time.After(time.Millisecond * 300)
 	}
 }

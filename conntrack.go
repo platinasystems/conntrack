@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"time"
+	"os"
+	"errors"
 )
 
 // ConnTCP is a connection
@@ -21,13 +23,30 @@ func (c ConnTCP) String() string {
 // ConnTrack monitors the connections. It is build with Established() and
 // Follow().
 type ConnTrack struct {
+	inteFamily uint8
 	connReq chan chan []ConnTCP
 	quit    chan struct{}
 }
-
+func Init() (err error){
+	err = enableConntrack("/proc/sys/net/netfilter/nf_conntrack_acct","1")
+	if err != nil {
+		return errors.New("failed to enable conntrack...ERROR:"+err.Error())
+	}
+	return
+}
+func enableConntrack(path, value string) (err error) {
+	file, err := os.Create(path)
+	defer file.Close()
+	if err != nil {
+		return err
+	}
+	file.WriteString(value)
+	return
+}
 // New returns a ConnTrack.
-func New() (*ConnTrack, error) {
+func New(inetFamily uint8) (*ConnTrack, error) {
 	c := ConnTrack{
+		inteFamily: inetFamily,
 		connReq: make(chan chan []ConnTCP),
 		quit:    make(chan struct{}),
 	}
@@ -75,7 +94,7 @@ func (c *ConnTrack) track() error {
 	}
 
 	established := map[ConnTCP]struct{}{}
-	cs, err := Established()
+	cs, err := Established(c.inteFamily)
 	if err != nil {
 		return err
 	}
